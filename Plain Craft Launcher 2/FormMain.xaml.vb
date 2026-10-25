@@ -12,7 +12,7 @@ Public Class FormMain
         '统计更新日志条目
         If BuildType = BuildTypes.Release Then
             If LastVersion < 415 Then 'Release 2.99.0.1
-                FeatureList.Add(New KeyValuePair(Of Integer, String)(4, "删除：MC 下载功能相关入口"))
+                FeatureList.Add(New KeyValuePair(Of Integer, String)(5, "恢复：重新开放原版 MC 与整合包下载功能"))
                 FeatureList.Add(New KeyValuePair(Of Integer, String)(1, "优化：为设置更新添加部分黑名单"))
             End If
             If LastVersion < 413 Then 'Release 2.99.0.0
@@ -108,7 +108,7 @@ Public Class FormMain
             '2：BUG* IMP-
             '1：BUG-
             If LastVersion < 416 Then 'Snapshot 2.99.0.1
-                FeatureList.Add(New KeyValuePair(Of Integer, String)(4, "删除：MC 下载功能相关入口"))
+                FeatureList.Add(New KeyValuePair(Of Integer, String)(5, "恢复：重新开放原版 MC 与整合包下载功能"))
                 FeatureList.Add(New KeyValuePair(Of Integer, String)(1, "优化：为设置更新添加部分黑名单"))
             End If
             If LastVersion < 414 Then 'Snapshot 2.99.0.0

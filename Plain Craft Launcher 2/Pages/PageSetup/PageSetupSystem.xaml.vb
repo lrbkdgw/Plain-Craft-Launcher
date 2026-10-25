@@ -40,7 +40,29 @@ Public Class PageSetupSystem
 
     '滑动条
     Private Sub SliderLoad()
+        SliderDownloadThread.GetHintText = Function(v) v + 1
+        SliderDownloadSpeed.GetHintText =
+        Function(v)
+            Select Case v
+                Case Is <= 14
+                    Return (v + 1) * 0.1 & " M/s"
+                Case Is <= 31
+                    Return (v - 11) * 0.5 & " M/s"
+                Case Is <= 41
+                    Return (v - 21) & " M/s"
+                Case Else
+                    Return "无限制"
+            End Select
+        End Function
         SliderDebugAnim.GetHintText = Function(v) If(v > 29, "关闭", (v / 10 + 0.1) & "x")
+    End Sub
+    Private Sub SliderDownloadThread_PreviewChange(sender As Object, e As RouteEventArgs) Handles SliderDownloadThread.PreviewChange
+        If SliderDownloadThread.Value < 100 Then Return
+        If Not Settings.Get(Of Boolean)("HintDownloadThread") Then
+            Settings.Set("HintDownloadThread", True)
+            MyMsgBox("如果设置过多的下载线程，可能会导致下载时出现非常严重的卡顿。" & vbCrLf &
+                     "一般设置 64 线程即可满足大多数下载需求，除非你知道你在干什么，否则不建议设置更多的线程数！", "警告", "我知道了", IsWarn:=True)
+        End If
     End Sub
 
     '识别码/土豆码替代入口
