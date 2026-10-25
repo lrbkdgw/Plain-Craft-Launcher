@@ -306,47 +306,20 @@ Retry:
     })
 
     ''' <summary>
-    ''' 最大线程数。
+    ''' 当全局速度低于此阈值时，下载管理器会尝试增加分段线程；此值不限制下载速度。
     ''' </summary>
-    Public ReadOnly Property NetTaskThreadLimit As Integer
-        Get
-            Return Settings.Get(Of Integer)("ToolDownloadThread") + 1
-        End Get
-    End Property
+    Public NetTaskThreadScaleThreshold As Long = 256 * 1024L '256K/s
     ''' <summary>
-    ''' 速度下限。
+    ''' 下载源在下载失败时的错误计数保护，避免无限重试失效来源。
     ''' </summary>
-    Public NetTaskSpeedLimitLow As Long = 256 * 1024L '256K/s
+    Private Const NetTaskSourceFailureThreshold As Integer = 30
+    Private Const NetTaskSourceFailureHardLimit As Integer = 258
     ''' <summary>
-    ''' 速度上限。若无限制则为 -1。
+    ''' 加载器的连续失败保护，避免无限重试失效文件。
     ''' </summary>
-    Public ReadOnly Property NetTaskSpeedLimitHigh As Long
-        Get
-            If _NetTaskSpeedLimitHigh Is Nothing Then
-                Dim Setting As Integer = Settings.Get(Of Integer)("ToolDownloadSpeed")
-                If Setting <= 14 Then
-                    _NetTaskSpeedLimitHigh = (Setting + 1) * 0.1 * 1024 * 1024L
-                ElseIf Setting <= 31 Then
-                    _NetTaskSpeedLimitHigh = (Setting - 11) * 0.5 * 1024 * 1024L
-                ElseIf Setting <= 41 Then
-                    _NetTaskSpeedLimitHigh = (Setting - 21) * 1024 * 1024L
-                Else
-                    _NetTaskSpeedLimitHigh = -1
-                End If
-            End If
-            Return _NetTaskSpeedLimitHigh.Value
-        End Get
-    End Property
-    Private _NetTaskSpeedLimitHigh As Long? = Nothing
-    Public Sub UpdateNetTaskSpeedLimitHigh(Value As Integer)
-        _NetTaskSpeedLimitHigh = Nothing
-    End Sub
+    Private Const NetTaskLoaderFailureThreshold As Integer = 2051
     ''' <summary>
-    ''' 基于限速，当前可以下载的剩余量。
-    ''' </summary>
-    Public NetTaskSpeedLimitLeft As Long = -1
-    ''' <summary>
-    ''' 正在运行中的线程数。
+    ''' 正在运行中的下载线程数。
     ''' </summary>
     Public NetTaskThreadCount As Integer = 0
 
@@ -812,7 +785,7 @@ Retry:
                 Dim Th As Thread, ThreadInfo As NetThread
                 '条件检测
                 SyncLock LockSource
-                    If NetTaskThreadCount >= NetTaskThreadLimit OrElse Not HasAvailableSource() OrElse
+                    If Not HasAvailableSource() OrElse
                         (IsNoSplit AndAlso Threads IsNot Nothing AndAlso Threads.State <> NetState.Canceled) Then Return Nothing
                     If State >= NetState.Merging OrElse State = NetState.WaitingToCheck Then Return Nothing
                     SyncLock LockState
@@ -992,12 +965,7 @@ NotSupportRange:
                 HttpDataCount = ResponseStream.ReadAsync(ResponseBytes, 0, 16384, CancelToken.Token).GetResultWithTimeout(CancelToken, Timeout)
                 While (IsUnknownSize OrElse Th.DownloadUndone > 0) AndAlso '判断是否下载完成
                             HttpDataCount > 0 AndAlso Not IsProgramEnding AndAlso State < NetState.Merging AndAlso (Not Th.Source.IsFailed OrElse Th.Source.SingleThread = Th)
-                    '限速
-                    While NetTaskSpeedLimitHigh > 0 AndAlso NetTaskSpeedLimitLeft <= 0
-                        Threading.Thread.Sleep(16)
-                    End While
                     Dim RealDataCount As Integer = If(IsUnknownSize, HttpDataCount, Math.Min(HttpDataCount, Th.DownloadUndone))
-                    If NetTaskSpeedLimitHigh > 0 Then Interlocked.Add(NetTaskSpeedLimitLeft, -RealDataCount)
                     Dim DeltaTime = GetTimeMs() - Th.LastReceiveTime
                     If DeltaTime > 100000000 Then DeltaTime = 1 '避免时间刻反转导致出现极大值
                     If RealDataCount > 0 Then
@@ -1021,11 +989,6 @@ NotSupportRange:
                         ResultStream.Write(ResponseBytes, 0, RealDataCount)
                         '已完成
                         If Th.DownloadUndone = 0 AndAlso Not IsUnknownSize Then Exit While
-                        '检查速度是否过慢
-                        If Th.LastReceiveTime > 0 AndAlso DeltaTime > 5000 AndAlso DeltaTime > RealDataCount AndAlso '数据包间隔大于 5s，且速度小于 1K/s
-                                    Th.Source.SingleThread Is Nothing Then '且并非单线程下载
-                            Throw New TimeoutException("由于速度过慢断开链接，下载 " & RealDataCount & " B，消耗 " & DeltaTime & " ms。")
-                        End If
                         Th.LastReceiveTime = GetTimeMs()
                     ElseIf Th.LastReceiveTime > 0 AndAlso DeltaTime > Timeout Then
                         '无数据，且已超时
@@ -1081,7 +1044,8 @@ SourceBreak:
                ex.Message.Contains("(502)") OrElse ex.Message.Contains("(404)") OrElse
                ex.Message.Contains("未能解析") OrElse ex.Message.Contains("无返回数据") OrElse ex.Message.Contains("空间不足") OrElse
                ((ex.Message.Contains("(403)") OrElse ex.Message.Contains("(429)")) AndAlso Not Th.Source.Url.Contains("bmclapi")) OrElse 'BMCLAPI 的部分源在高频率请求下会返回 403/429，所以不应因此禁用下载源
-               (Th.Source.FailCount >= NetTaskThreadLimit.Clamp(5, 30) AndAlso DownloadDone < 1) OrElse Th.Source.FailCount > NetTaskThreadLimit + 2 Then
+               (Th.Source.FailCount >= NetTaskSourceFailureThreshold AndAlso DownloadDone < 1) OrElse
+               Th.Source.FailCount > NetTaskSourceFailureHardLimit Then
                 '当一个下载源有多个线程在下载时，只选择其中一个线程进行后续处理
                 Dim IsThisFail As Boolean = False
                 SyncLock LockSource
@@ -1347,7 +1311,7 @@ Retry:
             End Get
             Set(value As Integer)
                 _FailCount = value
-                If State = LoadState.Loading AndAlso value >= Math.Min(10000, Math.Max(FileRemain * 8, NetTaskThreadLimit * 8 + 3)) Then
+                If State = LoadState.Loading AndAlso value >= Math.Min(10000, Math.Max(FileRemain * 8, NetTaskLoaderFailureThreshold)) Then
                     Logger.Error($"由于同加载器中失败次数过多引发强制失败：连续失败了 {value} 次", LogBehavior.ToastIfDebug)
                     On Error Resume Next
                     Dim ExList As New List(Of Exception)
@@ -1694,12 +1658,12 @@ FinishExCatch:
                     Weight -= 1
                 Next
                 Speed = If(SpeedDiv > 0, SpeedSum / SpeedDiv, 0)
-                '计算新的速度下限
-                Dim Limit As Long = 0
-                If SpeedLast.Count >= 10 Then Limit = SpeedLast.Take(10).Average * 0.85 '取近 1 秒的平均速度的 85%
-                If Limit > NetTaskSpeedLimitLow Then
-                    NetTaskSpeedLimitLow = Limit
-                    Logger.Info($"速度下限已提升到 {StringUtils.FormatByteSize(Limit)}")
+                '按近期速度调整分段线程扩展阈值；这只影响线程扩展策略，不会限制传输速度。
+                Dim ThreadScaleThreshold As Long = 0
+                If SpeedLast.Count >= 10 Then ThreadScaleThreshold = SpeedLast.Take(10).Average * 0.85 '取近 1 秒的平均速度的 85%
+                If ThreadScaleThreshold > NetTaskThreadScaleThreshold Then
+                    NetTaskThreadScaleThreshold = ThreadScaleThreshold
+                    Logger.Info($"分段线程扩展阈值已提升到 {StringUtils.FormatByteSize(ThreadScaleThreshold)}")
                 End If
 #End Region
 #Region "刷新下载任务属性"
@@ -1739,14 +1703,12 @@ FinishExCatch:
                         Next
                         '为等待中的文件开始线程
                         For Each File As NetFile In WaitingFiles
-                            If NetTaskThreadCount >= NetTaskThreadLimit Then Continue While '最大线程数检查
                             Dim NewThread = File.TryBeginThread()
                             If NewThread IsNot Nothing AndAlso NewThread.Source.Url.Contains("bmclapi") Then Thread.Sleep(100) '减少 BMCLAPI 请求频率
                         Next
                         '为进行中的文件追加线程
-                        If Speed >= NetTaskSpeedLimitLow Then Continue While '下载速度足够，无需新增
+                        If Speed >= NetTaskThreadScaleThreshold Then Continue While '下载速度足够，无需新增分段线程
                         For Each File As NetFile In OngoingFiles
-                            If NetTaskThreadCount >= NetTaskThreadLimit Then Continue While '最大线程数检查
                             '线程种类计数
                             Dim PreparingCount = 0, DownloadingCount = 0
                             If File.Threads IsNot Nothing Then
@@ -1775,8 +1737,6 @@ FinishExCatch:
                 Try
                     Dim NextTick As Long = GetTimeMs()
                     While True
-                        '增加限速余量
-                        If NetTaskSpeedLimitHigh > 0 Then Interlocked.Add(NetTaskSpeedLimitLeft, CLng(NetTaskSpeedLimitHigh / 10))
                         '刷新公开属性
                         RefreshStat()
                         '等待 100 ms
